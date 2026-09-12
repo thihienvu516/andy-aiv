@@ -60,14 +60,15 @@
     const orderCode = new URLSearchParams(window.location.search).get('orderCode');
     let operatorName = localStorage.getItem('operatorName') || '';
 
-    // Trạng thái hiện tại -> { action gọi lên server, chữ trên nút } cho các bước đơn giản (1 nút)
+    // Trạng thái hiện tại -> { action gọi lên server, chữ trên nút } cho các bước đơn giản (1 nút, không cần nhập gì)
     const NEXT_ACTION = {
-      'Booked':   { action: 'receive',  label: '📦 Đã nhận NVL (Received)' },
       'Received': { action: 'start',    label: '▶️ Bắt đầu chạy đơn (Start)' },
       'Started':  { action: 'firstoff', label: '🔍 Gọi QC First Off' },
       'FirstOff': { action: 'run',      label: '🏭 Chạy hàng loạt (Run)' },
       'Stopped':  { action: 'resume',   label: '▶️ Tiếp tục chạy (Resume)' }
     };
+    // Các trạng thái mà kho vẫn có thể tới cấp thêm NVL song song với máy đang chạy
+    const MATERIAL_TOPUP_STATES = ['Received', 'Started', 'FirstOff', 'Running', 'Stopped'];
 
     function setStatus(text, isError) {
       const el = document.getElementById('status');
@@ -145,6 +146,19 @@
       return btn;
     }
 
+    // Dùng cho thao tác quan trọng, cần hỏi lại trước khi thực hiện (dừng máy, kết thúc đơn...)
+    function makeConfirmButton(label, confirmMsg, onClick, cssClass) {
+      const btn = document.createElement('button');
+      btn.innerText = label;
+      if (cssClass) btn.className = cssClass;
+      btn.onclick = function () {
+        if (!confirm(confirmMsg)) return; // Huỷ -> không làm gì, nút vẫn bấm lại được
+        btn.disabled = true;
+        onClick();
+      };
+      return btn;
+    }
+
     function render(result) {
       showOperatorLine();
       document.getElementById('mainScreen').style.display = 'block';
@@ -160,12 +174,39 @@
         return;
       }
 
-      document.getElementById('stateLabel').innerText = 'Trạng thái hiện tại: ' + result.state;
+      document.getElementById('stateLabel').innerText = 'Trạng thái hiện tại: ' + result.state +
+        (result.materialReceived ? ' — Đã nhận NVL: ' + result.materialReceived : '');
 
       if (result.state === 'Done') {
         area.innerHTML = '<p>Lệnh đã kết thúc, không còn thao tác.</p>';
         return;
       }
+
+      // Booked: chưa có NVL nào -> màn hình duy nhất là nhập số lượng nhận đợt đầu
+      if (result.state === 'Booked') {
+        const block = document.createElement('div');
+        block.className = 'updateBlock';
+        block.innerHTML = '<input type="number" id="matQty" placeholder="Số lượng NVL nhận được">';
+        block.appendChild(makeButton('📦 Nhận NVL (đợt đầu)', function () {
+          const qty = document.getElementById('matQty').value;
+          if (!qty) { setStatus('Nhập số lượng NVL trước đã', true); loadStatus(); return; }
+          callApi({ action: 'receive_material', quantity: qty }, '✅ Đã ghi nhận NVL!');
+        }));
+        area.appendChild(block);
+        return;
+      }
+
+      // Từ đây trở đi (đã qua Booked, chưa Done): luôn cho phép kho nhận thêm NVL song song,
+      // rồi mới tới hành động chính của từng trạng thái.
+      const topupBlock = document.createElement('div');
+      topupBlock.className = 'updateBlock';
+      topupBlock.innerHTML = '<input type="number" id="matQtyMore" placeholder="Số lượng NVL nhận thêm (nếu có)">';
+      topupBlock.appendChild(makeButton('📦 Nhận thêm NVL', function () {
+        const qty = document.getElementById('matQtyMore').value;
+        if (!qty) { setStatus('Nhập số lượng NVL trước đã', true); loadStatus(); return; }
+        callApi({ action: 'receive_material', quantity: qty }, '✅ Đã ghi nhận thêm NVL!');
+      }, 'secondary'));
+      area.appendChild(topupBlock);
 
       if (result.state === 'Running') {
         const qtyBlock = document.createElement('div');
@@ -174,22 +215,26 @@
         qtyBlock.appendChild(makeButton('📊 Cập nhật sản lượng', function () {
           const qty = document.getElementById('qty').value;
           if (!qty) { setStatus('Nhập số lượng trước đã', true); loadStatus(); return; }
-          callApi({ action: 'update_qty', quantity: qty }, '✅ Đã cập nhật sản lượng!', true);
+          callApi({ action: 'update_qty', quantity: qty }, '✅ Đã cập nhật sản lượng!');
         }));
         area.appendChild(qtyBlock);
 
         const stopBlock = document.createElement('div');
         stopBlock.className = 'updateBlock';
         stopBlock.innerHTML = '<input type="text" id="reason" placeholder="Lý do dừng máy (không bắt buộc)">';
-        stopBlock.appendChild(makeButton('⏸️ Dừng máy (sự cố)', function () {
-          const reason = document.getElementById('reason').value;
-          callApi({ action: 'stop', reason: reason }, '⏸️ Đã ghi nhận dừng máy!');
-        }, 'secondary'));
+        stopBlock.appendChild(makeConfirmButton('⏸️ Dừng máy (sự cố)',
+          'Xác nhận DỪNG MÁY cho đơn ' + orderCode + '?',
+          function () {
+            const reason = document.getElementById('reason').value;
+            callApi({ action: 'stop', reason: reason }, '⏸️ Đã ghi nhận dừng máy!');
+          }, 'secondary'));
         area.appendChild(stopBlock);
 
-        area.appendChild(makeButton('✅ Kết thúc đơn hàng', function () {
-          callApi({ action: 'finish' }, '✅ Đã kết thúc đơn hàng!');
-        }, 'danger'));
+        area.appendChild(makeConfirmButton('✅ Kết thúc đơn hàng',
+          'Xác nhận KẾT THÚC đơn ' + orderCode + '? Không thể hoàn tác sau khi xác nhận.',
+          function () {
+            callApi({ action: 'finish' }, '✅ Đã kết thúc đơn hàng!');
+          }, 'danger'));
         return;
       }
 
@@ -203,7 +248,7 @@
       }));
     }
 
-    async function callApi(extra, successMsg, stayOnScreen) {
+    async function callApi(extra, successMsg) {
       setStatus('Đang gửi...');
       try {
         const payload = Object.assign({ orderCode: orderCode, operatorName: operatorName }, extra);
@@ -214,12 +259,7 @@
         });
         const result = await res.json();
         if (result.error) throw new Error(result.error);
-        if (stayOnScreen) {
-          setStatus(successMsg);
-          loadStatus();
-        } else {
-          showDone(successMsg);
-        }
+        showDone(successMsg);
       } catch (err) {
         setStatus('Lỗi: ' + err.message, true);
         loadStatus();
