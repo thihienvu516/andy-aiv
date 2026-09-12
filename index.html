@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Cập nhật sản xuất</title>
+  <link rel="manifest" href="manifest.json">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Cập nhật SX">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <style>
+    body { font-family: sans-serif; padding: 16px; max-width: 480px; margin: 0 auto; }
+    button {
+      display: block; width: 100%; padding: 16px; margin: 10px 0;
+      font-size: 17px; border-radius: 8px; border: none;
+      background: #2AABEE; color: #fff;
+    }
+    button.secondary { background: #f0f0f0; color: #333; }
+    button.danger { background: #e74c3c; }
+    button:disabled { background: #ccc; color: #888; }
+    input, textarea {
+      width: 100%; padding: 12px; font-size: 18px; margin: 10px 0;
+      box-sizing: border-box; border-radius: 8px; border: 1px solid #ccc;
+    }
+    #operatorLine { color: #666; font-size: 13px; margin-bottom: 8px; }
+    #operatorLine a { color: #2AABEE; }
+    #orderLabel { font-weight: bold; }
+    #stateLabel { color: #666; font-size: 14px; margin-bottom: 12px; }
+    #status { color: #666; font-size: 14px; }
+    .error { color: #cc3333; }
+    #loading, #noParam, #doneMsg { text-align: center; color: #999; padding-top: 40px; }
+    .updateBlock { border: 1px solid #eee; border-radius: 8px; padding: 12px; margin: 10px 0; }
+  </style>
+</head>
+<body>
+  <div id="loading">Đang tải...</div>
+  <div id="noParam" style="display:none">Đường dẫn không hợp lệ — vui lòng quét lại mã QR trên phiếu lệnh sản xuất.</div>
+  <div id="doneMsg" style="display:none"></div>
+
+  <div id="nameScreen" style="display:none">
+    <p>Nhập tên của anh/chị (chỉ cần làm 1 lần trên điện thoại này):</p>
+    <input type="text" id="nameInput" placeholder="Tên người thao tác">
+    <button onclick="saveOperatorName()">Xác nhận</button>
+  </div>
+
+  <div id="mainScreen" style="display:none">
+    <p id="operatorLine"></p>
+    <p id="orderLabel"></p>
+    <p id="stateLabel"></p>
+    <div id="actionArea"></div>
+  </div>
+
+  <p id="status"></p>
+
+  <script>
+    // !!! ĐỔI đúng URL Apps Script đã deploy của anh vào đây !!!
+    const API_URL = 'https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec';
+
+    const orderCode = new URLSearchParams(window.location.search).get('orderCode');
+    let operatorName = localStorage.getItem('operatorName') || '';
+
+    // Trạng thái hiện tại -> { action gọi lên server, chữ trên nút } cho các bước đơn giản (1 nút)
+    const NEXT_ACTION = {
+      'Booked':   { action: 'receive',  label: '📦 Đã nhận NVL (Received)' },
+      'Received': { action: 'start',    label: '▶️ Bắt đầu chạy đơn (Start)' },
+      'Started':  { action: 'firstoff', label: '🔍 Gọi QC First Off' },
+      'FirstOff': { action: 'run',      label: '🏭 Chạy hàng loạt (Run)' },
+      'Stopped':  { action: 'resume',   label: '▶️ Tiếp tục chạy (Resume)' }
+    };
+
+    function setStatus(text, isError) {
+      const el = document.getElementById('status');
+      el.innerText = text;
+      el.className = isError ? 'error' : '';
+    }
+
+    function showOperatorLine() {
+      document.getElementById('operatorLine').innerHTML =
+        'Người thao tác: <b>' + operatorName + '</b> (<a href="#" onclick="changeOperator(); return false;">đổi</a>)';
+    }
+
+    function changeOperator() {
+      localStorage.removeItem('operatorName');
+      operatorName = '';
+      document.getElementById('mainScreen').style.display = 'none';
+      document.getElementById('nameScreen').style.display = 'block';
+    }
+
+    function saveOperatorName() {
+      const val = document.getElementById('nameInput').value.trim();
+      if (!val) return;
+      operatorName = val;
+      localStorage.setItem('operatorName', val);
+      document.getElementById('nameScreen').style.display = 'none';
+      document.getElementById('loading').style.display = 'block';
+      loadStatus();
+    }
+
+    function showDone(text) {
+      ['loading', 'mainScreen', 'status'].forEach(function (id) { document.getElementById(id).style.display = 'none'; });
+      const el = document.getElementById('doneMsg');
+      el.innerText = text + ' Đang đóng...';
+      el.style.display = 'block';
+      setTimeout(function () {
+        window.close();
+        el.innerText = text + ' Anh có thể quay lại màn hình chính, hoặc quét mã tiếp theo.';
+      }, 400);
+    }
+
+    function init() {
+      if (!orderCode) {
+        document.getElementById('loading').style.display = 'none';
+        document.getElementById('noParam').style.display = 'block';
+        return;
+      }
+      if (!operatorName) {
+        document.getElementById('loading').style.display = 'none';
+        document.getElementById('nameScreen').style.display = 'block';
+        return;
+      }
+      loadStatus();
+    }
+
+    async function loadStatus() {
+      document.getElementById('loading').style.display = 'block';
+      document.getElementById('mainScreen').style.display = 'none';
+      try {
+        const res = await fetch(API_URL + '?orderCode=' + encodeURIComponent(orderCode));
+        const result = await res.json();
+        document.getElementById('loading').style.display = 'none';
+        if (result.error) { setStatus('Lỗi: ' + result.error, true); return; }
+        render(result);
+      } catch (err) {
+        document.getElementById('loading').style.display = 'none';
+        setStatus('Lỗi kết nối: ' + err.message, true);
+      }
+    }
+
+    function makeButton(label, onClick, cssClass) {
+      const btn = document.createElement('button');
+      btn.innerText = label;
+      if (cssClass) btn.className = cssClass;
+      btn.onclick = function () { btn.disabled = true; onClick(); };
+      return btn;
+    }
+
+    function render(result) {
+      showOperatorLine();
+      document.getElementById('mainScreen').style.display = 'block';
+      document.getElementById('orderLabel').innerText = 'Mã lệnh: ' + orderCode;
+      const area = document.getElementById('actionArea');
+      area.innerHTML = '';
+
+      if (!result.exists) {
+        document.getElementById('stateLabel').innerText = 'Lệnh chưa tồn tại trong hệ thống.';
+        area.appendChild(makeButton('📋 Book lệnh sản xuất mới', function () {
+          callApi({ action: 'book' }, '✅ Đã book lệnh!');
+        }));
+        return;
+      }
+
+      document.getElementById('stateLabel').innerText = 'Trạng thái hiện tại: ' + result.state;
+
+      if (result.state === 'Done') {
+        area.innerHTML = '<p>Lệnh đã kết thúc, không còn thao tác.</p>';
+        return;
+      }
+
+      if (result.state === 'Running') {
+        const qtyBlock = document.createElement('div');
+        qtyBlock.className = 'updateBlock';
+        qtyBlock.innerHTML = '<input type="number" id="qty" placeholder="Số lượng làm được (từ lần cập nhật trước)">';
+        qtyBlock.appendChild(makeButton('📊 Cập nhật sản lượng', function () {
+          const qty = document.getElementById('qty').value;
+          if (!qty) { setStatus('Nhập số lượng trước đã', true); loadStatus(); return; }
+          callApi({ action: 'update_qty', quantity: qty }, '✅ Đã cập nhật sản lượng!', true);
+        }));
+        area.appendChild(qtyBlock);
+
+        const stopBlock = document.createElement('div');
+        stopBlock.className = 'updateBlock';
+        stopBlock.innerHTML = '<input type="text" id="reason" placeholder="Lý do dừng máy (không bắt buộc)">';
+        stopBlock.appendChild(makeButton('⏸️ Dừng máy (sự cố)', function () {
+          const reason = document.getElementById('reason').value;
+          callApi({ action: 'stop', reason: reason }, '⏸️ Đã ghi nhận dừng máy!');
+        }, 'secondary'));
+        area.appendChild(stopBlock);
+
+        area.appendChild(makeButton('✅ Kết thúc đơn hàng', function () {
+          callApi({ action: 'finish' }, '✅ Đã kết thúc đơn hàng!');
+        }, 'danger'));
+        return;
+      }
+
+      const next = NEXT_ACTION[result.state];
+      if (!next) {
+        area.innerHTML = '<p>Không xác định được thao tác cho trạng thái "' + result.state + '".</p>';
+        return;
+      }
+      area.appendChild(makeButton(next.label, function () {
+        callApi({ action: next.action }, '✅ Đã cập nhật trạng thái!');
+      }));
+    }
+
+    async function callApi(extra, successMsg, stayOnScreen) {
+      setStatus('Đang gửi...');
+      try {
+        const payload = Object.assign({ orderCode: orderCode, operatorName: operatorName }, extra);
+        const res = await fetch(API_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify(payload)
+        });
+        const result = await res.json();
+        if (result.error) throw new Error(result.error);
+        if (stayOnScreen) {
+          setStatus(successMsg);
+          loadStatus();
+        } else {
+          showDone(successMsg);
+        }
+      } catch (err) {
+        setStatus('Lỗi: ' + err.message, true);
+        loadStatus();
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>
