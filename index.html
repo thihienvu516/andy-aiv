@@ -138,27 +138,55 @@
       }
     }
 
-    function buildBomSelect(bomList) {
-      const select = document.createElement('select');
-      select.style.cssText = 'width:100%;padding:10px;font-size:16px;margin:6px 0;border-radius:8px;border:1px solid #ccc;box-sizing:border-box;';
-      bomList.forEach(function (b) {
-        const opt = document.createElement('option');
-        opt.value = b.materialCode;
-        opt.innerText = b.materialCode + ' - ' + b.description + ' (đã nhận ' + b.qtyReceived + '/' + b.qtyNeeded + ')';
-        select.appendChild(opt);
-      });
-      return select;
-    }
+    function buildMaterialBatchForm(bomList, defaultQtyFn, buttonLabel, isSecondary) {
+      const block = document.createElement('div');
+      block.className = 'updateBlock';
 
-    function buildBomStatusHtml(bomList) {
-      if (!bomList || !bomList.length) return '';
-      let html = '<div style="font-size:12px;color:#666;margin:6px 0;line-height:1.6;">';
+      if (!bomList.length) {
+        block.innerHTML = '<p style="font-size:13px;color:#666;">Đơn này chưa có danh sách vật tư (BOM).</p>';
+        const qtyInput = document.createElement('input');
+        qtyInput.type = 'number';
+        qtyInput.placeholder = 'Số lượng NVL';
+        block.appendChild(qtyInput);
+        block.appendChild(makeButton(buttonLabel, function () {
+          if (!qtyInput.value) { setStatus('Nhập số lượng trước đã', true); loadStatus(); return; }
+          callApi({ action: 'receive_material_batch', items: [{ materialCode: '', quantity: qtyInput.value }] },
+            '✅ Đã ghi nhận NVL!');
+        }, isSecondary ? 'secondary' : null));
+        return block;
+      }
+
+      const p = document.createElement('p');
+      p.style.cssText = 'font-size:13px;color:#666;';
+      p.innerText = 'Mặc định đủ số lượng cần — sửa lại nếu thực nhận khác (VD: chỉ có 500/1000):';
+      block.appendChild(p);
+
+      const inputs = [];
       bomList.forEach(function (b) {
-        const pct = b.qtyNeeded > 0 ? Math.round(b.qtyReceived / b.qtyNeeded * 100) : 0;
-        html += b.materialCode + ': ' + b.qtyReceived + '/' + b.qtyNeeded + ' (' + pct + '%)<br>';
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;align-items:center;gap:8px;margin:6px 0;';
+        const label = document.createElement('span');
+        label.style.cssText = 'flex:1;font-size:13px;';
+        label.innerText = b.materialCode + ' - ' + b.description + ' (đã có ' + (b.qtyReceived || 0) + '/' + b.qtyNeeded + ')';
+        const input = document.createElement('input');
+        input.type = 'number';
+        input.style.cssText = 'width:100px;margin:0;';
+        input.value = defaultQtyFn(b);
+        row.appendChild(label);
+        row.appendChild(input);
+        block.appendChild(row);
+        inputs.push({ materialCode: b.materialCode, input: input });
       });
-      html += '</div>';
-      return html;
+
+      block.appendChild(makeButton(buttonLabel, function () {
+        const items = inputs
+          .map(function (x) { return { materialCode: x.materialCode, quantity: x.input.value }; })
+          .filter(function (x) { return x.quantity && Number(x.quantity) > 0; });
+        if (!items.length) { setStatus('Chưa nhập số lượng nào', true); loadStatus(); return; }
+        callApi({ action: 'receive_material_batch', items: items }, '✅ Đã ghi nhận NVL!');
+      }, isSecondary ? 'secondary' : null));
+
+      return block;
     }
 
     function makeButton(label, onClick, cssClass) {
@@ -205,43 +233,18 @@
         return;
       }
 
-      // Booked: chưa có NVL nào -> chọn đúng vật tư đang nhận + số lượng
+      // Booked: chưa có NVL nào -> hiện form TẤT CẢ vật tư, mặc định = đủ số cần cho cả đơn, cho sửa từng dòng
       if (result.state === 'Booked') {
-        const block = document.createElement('div');
-        block.className = 'updateBlock';
-        block.innerHTML = '<p style="font-size:14px;">Chọn vật tư đang nhận:</p>' + buildBomStatusHtml(result.bom);
-        const select = buildBomSelect(result.bom || []);
-        block.appendChild(select);
-        const qtyInput = document.createElement('input');
-        qtyInput.type = 'number';
-        qtyInput.placeholder = 'Số lượng NVL nhận được';
-        block.appendChild(qtyInput);
-        block.appendChild(makeButton('📦 Nhận NVL (đợt đầu)', function () {
-          if (!qtyInput.value) { setStatus('Nhập số lượng NVL trước đã', true); loadStatus(); return; }
-          callApi({ action: 'receive_material', materialCode: select.value, quantity: qtyInput.value },
-            '✅ Đã ghi nhận NVL!');
-        }));
-        area.appendChild(block);
+        area.appendChild(buildMaterialBatchForm(result.bom || [], function (b) { return b.qtyNeeded; },
+          '📦 Xác nhận đã nhận đủ (sửa lại nếu thiếu)'));
         return;
       }
 
       // Từ đây trở đi (đã qua Booked, chưa Done): luôn cho phép kho nhận thêm NVL song song,
-      // rồi mới tới hành động chính của từng trạng thái.
-      const topupBlock = document.createElement('div');
-      topupBlock.className = 'updateBlock';
-      topupBlock.innerHTML = '<p style="font-size:13px;color:#666;">📦 Nhận thêm NVL (nếu có):</p>' + buildBomStatusHtml(result.bom);
-      const topupSelect = buildBomSelect(result.bom || []);
-      topupBlock.appendChild(topupSelect);
-      const topupQty = document.createElement('input');
-      topupQty.type = 'number';
-      topupQty.placeholder = 'Số lượng nhận thêm';
-      topupBlock.appendChild(topupQty);
-      topupBlock.appendChild(makeButton('📦 Nhận thêm NVL', function () {
-        if (!topupQty.value) { setStatus('Nhập số lượng NVL trước đã', true); loadStatus(); return; }
-        callApi({ action: 'receive_material', materialCode: topupSelect.value, quantity: topupQty.value },
-          '✅ Đã ghi nhận thêm NVL!');
-      }, 'secondary'));
-      area.appendChild(topupBlock);
+      // mặc định điền phần CÒN THIẾU của mỗi vật tư, cho sửa lại nếu thực nhận khác.
+      area.appendChild(buildMaterialBatchForm(result.bom || [],
+        function (b) { return Math.max((b.qtyNeeded || 0) - (b.qtyReceived || 0), 0); },
+        '📦 Nhận thêm NVL', true));
 
       if (result.state === 'Running') {
         const qtyBlock = document.createElement('div');
